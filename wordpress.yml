@@ -1,0 +1,205 @@
+- hosts: ubuntu2
+  vars_prompt:
+    - name: mysql_root_password
+      prompt: "Пароль для root Mysql"
+
+    - name: mysql_user_password
+      prompt: "Пароль для пользователя wordpress"
+
+    - name: wp_user_password
+      prompt: "Пароль администратора wordpress"
+
+    - name: http_host
+      prompt: "Доменное имя"
+      private: no
+
+  tasks:
+    - name: Domain name
+      debug:
+        msg: "{{ http_host }}"
+
+
+
+  tasks:
+    - name: Install PHP
+      apt:
+         pkg:
+         - php7.2-fpm
+         - php7.2-curl
+         - php7.2-gd
+         - php7.2-intl
+         - php7.2-mbstring
+         - php7.2-soap
+         - php7.2-xml
+         - php7.2-xmlrpc
+         - php7.2-zip
+         - php7.2-mysql
+         - php7.2-imagick
+
+    - name: Install mysql
+      apt:
+         name: mysql-server
+         state: present
+
+    - name: Install nginx
+      apt:
+         name: nginx
+         state: present
+#################################################
+#https://github.com/jdauphant/ansible-role-ssl-certs/blob/master/tasks/generate.yml
+#################################################
+    - name: install pyopenssl
+      apt:
+         name: python-openssl
+         state: present
+
+    - name: Generate pryvatekey
+      openssl_privatekey:
+        path: /etc/ssl/private/nginx-selfsigned.key
+        size: 2048
+
+    - name: Generate cetificate
+      openssl_certificate:
+        path: /etc/ssl/certs/nginx-selfsigned.crt
+        privatekey_path: /etc/ssl/private/nginx-selfsigned.key 
+
+    - name: Generate DH Parameters
+      openssl_dhparam:
+        path: /etc/nginx/dhparam.pem
+        size: 4096
+
+    - name: Add nginx.conf
+      template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+
+    - name: Add sef-signed.conf
+      template:
+        src: templates/self-signed.conf.j2
+        dest: /etc/nginx/snippets/self-signed.conf
+
+    - name: Add ssl-paramsconf
+      template:
+        src: templates/ssl-paramsconf.j2
+        dest: /etc/nginx/snippets/ssl-params.conf
+
+
+#################################################
+    - name: Pip install
+      apt:
+         name: python2.7-mysqldb
+         state: present
+
+
+    - name: Set root Password
+      mysql_user: login_password={{ mysql_root_password }} check_implicit_admin=yes name=root host={{ item }} password={{ mysql_root_password }} state=present
+      with_items:
+        - localhost
+        - 127.0.0.1
+        - ::1
+
+    - name: Add .my.cnf
+      template:
+         src: templates/my.cnf.j2
+         dest: /root/.my.cnf
+         owner: root
+         group: root
+         mode: 0600
+
+    - name: Reload privilege tables
+      command: 'mysql -ne "{{ item }}"'
+      with_items:
+        - FLUSH PRIVILEGES
+      changed_when: False
+
+    - name: Remove anonymous users
+      command: 'mysql -ne "{{ item }}"'
+      with_items:
+        - DELETE FROM mysql.user WHERE User=''
+      changed_when: False
+
+    - name: Disallow root login remotely
+      command: 'mysql -ne "{{ item }}"'
+      with_items:
+        - DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1')
+      changed_when: False
+
+    - name: Remove test database and access to it
+      command: 'mysql -ne "{{ item }}"'
+      with_items:
+        - DROP DATABASE IF EXISTS test
+        - DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%'
+      changed_when: False
+
+    - name: Reload privilege tables
+      command: 'mysql -ne "{{ item }}"'
+      with_items:
+        - FLUSH PRIVILEGES
+      changed_when: False
+
+
+#################################################
+
+    - name: Create a new database with name 'wordpress'
+      mysql_db:
+        name: wordpress
+        encoding: utf8mb4
+        state: present
+
+    - name: Create user with password
+      mysql_user:
+        name: wpuser
+        password: "{{mysql_user_password}}"
+        priv: 'wordpress.*:ALL,GRANT'
+        state: present
+
+    - name: Reload privilege
+      command: 'mysql -ne "{{ item }}"'
+      with_items:
+        - FLUSH PRIVILEGES
+
+##################################################
+
+
+    - name: Create root dir
+      file:
+        path: /var/www/{{http_host}}
+        state: directory
+
+  # WordPress Configuration
+    - name: Download and unpack latest WordPress
+      unarchive:
+        src: https://wordpress.org/latest.tar.gz
+        dest: "/var/www/{{ http_host }}"
+        remote_src: yes
+        creates: "/var/www/{{ http_host }}/wordpress"
+
+    - name: Set ownership
+      file:
+        path: "/var/www/{{ http_host }}"
+        state: directory
+        recurse: yes
+        owner: www-data
+        group: www-data
+
+    - name: Set permissions for directories
+      shell: "/usr/bin/find /var/www/{{ http_host }}/wordpress/ -type d -exec chmod 750 {} \\;"
+
+    - name: Set permissions for files
+      shell: "/usr/bin/find /var/www/{{ http_host }}/wordpress/ -type f -exec chmod 640 {} \\;"
+
+    - name: Set up wp-config
+      template:
+        src: "templates/wp-config.php.j2"
+        dest: "/var/www/{{ http_host }}/wordpress/wp-config.php"
+
+##########################################################
+
+    - name: Стартуем
+      service:
+        name: "{{ item}}"
+        state: restarted
+      with_items:
+        - nginx
+        - php7.2-fpm
+        - mysql
